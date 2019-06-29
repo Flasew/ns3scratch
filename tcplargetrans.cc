@@ -28,7 +28,7 @@ public:
   static std::unordered_map<uint64_t, NetDeviceContainer> netList;
   static std::unordered_map<uint64_t, Ipv4InterfaceContainer> ifList;
 
-  static std::default_random_engine gen;
+  
   static std::normal_distribution<double> rjitnd;
 
   static void 
@@ -97,7 +97,7 @@ public:
   }
 
   static void 
-  ChangeBW(uint64_t rate, uint32_t i, uint32_t j, bool ratejitter=true) {
+  ChangeBW(uint64_t rate, uint32_t i, uint32_t j, std::default_random_engine & gen, bool ratejitter=true) {
 
     if (ratejitter) {
       int jit = rjitnd(gen);
@@ -142,9 +142,7 @@ NodeContainer TopoHelper::allNodes = NodeContainer();
 std::unordered_map<uint64_t, NetDeviceContainer> TopoHelper::netList = std::unordered_map<uint64_t, NetDeviceContainer>();
 std::unordered_map<uint64_t, Ipv4InterfaceContainer> TopoHelper::ifList = std::unordered_map<uint64_t, Ipv4InterfaceContainer>();
 
-std::random_device rd();
 
-std::default_random_engine TopoHelper::gen = std::default_random_engine(rd());
 std::normal_distribution<double> TopoHelper::rjitnd = std::normal_distribution<double>();
 
 std::normal_distribution<double> tjitnd;
@@ -178,14 +176,14 @@ bool bidir = false;
 bool rjitter_enable = true;
 bool tjitter_enable = true;
 
-std::default_random_engine  gen(rd());
+std::default_random_engine  gen;
 
 int curr_rate = 0;
 
 void CycleRate() {
 
   curr_rate = (curr_rate + 1) % bwt.size();
-  TopoHelper::ChangeBW(bwt[curr_rate].first, 2, 3, rjitter_enable);
+  TopoHelper::ChangeBW(bwt[curr_rate].first, 2, 3, gen, rjitter_enable);
 
   uint64_t t = bwt[curr_rate].second;
 
@@ -219,7 +217,6 @@ static void CwndTrace (std::string ctxt, uint32_t oldValue, uint32_t newValue)
 
 std::vector<uint64_t> frdata;
 std::vector<uint64_t> lodata;
-std::vector<uint64_t> clodata;
 
 static void
 CongStateTrace (std::string ctxt, 
@@ -237,11 +234,7 @@ CongStateTrace (std::string ctxt,
   if (oldValue != TcpSocketState::CA_LOSS && newValue == TcpSocketState::CA_LOSS) {
     ++lodata[flowid];
     if (lolog.is_open())
-      lolog <<  Simulator::Now().GetNanoSeconds() << ", " << ctxt << ", " << ++lodata[flowid] << std::endl;
-  }
-
-  if (oldValue == TcpSocketState::CA_LOSS && newValue == TcpSocketState::CA_LOSS) {
-    ++clodata[flowid];
+      lolog <<  Simulator::Now().GetNanoSeconds() << ", " << ctxt << ", " << lodata[flowid] << std::endl;
   }
 
 }
@@ -312,6 +305,9 @@ int main(int argc, char * argv[]) {
 
   ParseBWP(bwt_str);
 
+  std::random_device rd;
+  gen = std::default_random_engine(rd());
+
   if (((int)rjitter) <= 0)
     rjitter_enable = false;
   else
@@ -357,12 +353,12 @@ int main(int argc, char * argv[]) {
   config << "\t\"nflows\":\t" << nflows << "," << std::endl;
   config << "\t\"bidirectional\":\t" << bidir << "," << std::endl;
   config << "\t\"rate_jitter\":\t" << (rjitter_enable ? rjitter : 0) << "," << std::endl;
-  config << "\t\"dt_jitter\":\t" << (rjitter_enable ? rjitter : 0 )<< "," << std::endl;
+  config << "\t\"dt_jitter\":\t" << (tjitter_enable ? tjitter : 0 )<< "," << std::endl;
   config << "\t\"static\":\t" << nochange << "," << std::endl;
 
   config << "\t\"bwp\":\t[" << std::endl;  
 
-  for (int k = 0; k < bwt.size(); k++) {
+  for (uint64_t k = 0; k < bwt.size(); k++) {
     auto & item = bwt[k];
     config << "\t\t{\"rate\": " << item.first << ", \"time\": " << item.second << "}" << (k==bwt.size()-1 ? "" : ",") << std::endl;  
   }
@@ -517,13 +513,12 @@ int main(int argc, char * argv[]) {
 
   config << "\t\"flowdata\":\t[" << std::endl;
 
-  for (int k = 0; k < nflows; k++) {
+  for (uint64_t k = 0; k < nflows; k++) {
     config << "\t\t{" << std::endl; 
     config << "\t\t\t\"port\":\t" << (k + sendPortBase) << "," << std::endl; 
     config << "\t\t\t\"retransmit\":\t" << frdata[k] << "," << std::endl; 
     config << "\t\t\t\"timeout\":\t" << lodata[k] << "," << std::endl; 
-    config << "\t\t\t\"consecutive_timeout\":\t" << clodata[k] << "," << std::endl; 
-    config << "\t\t\t\"syn_sent\":\t" << syndata[k] << "," << std::endl; 
+    config << "\t\t\t\"syn_sent\":\t" << syndata[k] << std::endl; 
     config << "\t\t}" << (k == nflows-1 ? "" : ",") << std::endl; 
   }
   config << "\t]" << std::endl;
