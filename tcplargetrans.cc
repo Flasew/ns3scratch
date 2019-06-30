@@ -100,9 +100,9 @@ public:
   ChangeBW(uint64_t rate, uint32_t i, uint32_t j, std::default_random_engine & gen, bool ratejitter=true) {
 
     if (ratejitter) {
-      int jit = rjitnd(gen);
-      if (-(jit*2) > 0 && (uint64_t)(-(jit*2)) >= rate)
-        jit = 0;
+      // int jit = rjitnd(gen);
+      // if (-(jit*2) > 0 && (uint64_t)(-(jit*2)) >= rate)
+      //   jit = 0;
       rate = rate + rjitnd(gen);
     }
 
@@ -189,9 +189,9 @@ void CycleRate() {
 
   if (tjitter_enable) {
     int jit = tjitnd(gen);
-    if (-(jit*2) > 0 && (uint64_t)(-(jit*2)) >= t)
+    if ((jit*2) < 0 && (uint64_t)(-(jit*2)) >= t)
       jit = 0;
-    t = t + tjitnd(gen);
+    t = t + jit;
   }
 
   Simulator::Schedule(MicroSeconds(t), CycleRate);
@@ -316,7 +316,7 @@ int main(int argc, char * argv[]) {
   if (((int)tjitter) <= 0)
     tjitter_enable = false;
   else
-    tjitnd = std::normal_distribution<double>(0, rjitter);
+    tjitnd = std::normal_distribution<double>(0, tjitter);
 
   auto t = std::time(nullptr);
   auto tm = *std::localtime(&t);
