@@ -21,6 +21,56 @@ using namespace ns3;
 
 NS_LOG_COMPONENT_DEFINE("TCP_LARGE_TRANSFER");
 
+struct LinkParam;
+class TopoHelper;
+
+std::normal_distribution<double> tjitnd;
+
+std::ofstream qllog;
+std::ofstream frlog;
+std::ofstream lolog;
+std::ofstream cwndlog;
+std::ofstream config;
+
+std::string bwt_str;
+std::string hdelay = "10us";
+std::string l_inter = "100us";
+std::vector<LinkParam> bwt;
+
+uint16_t sendPortBase = 50000;
+
+double nsd = 5000.0;
+double rjitter = 100000.0;
+double tjitter = 20.0;
+uint32_t dupackth = 3;
+uint64_t max_bytes = 20000000000;
+uint64_t simtime = 60;
+uint64_t h_rate = 40000000000;
+uint64_t rwnd = 262144;
+uint64_t nflows = 1;
+uint64_t q_size = 60;
+bool nochange = false;
+bool indivlog = true;
+bool bidir = false;
+bool rjitter_enable = true;
+bool tjitter_enable = true;
+
+std::default_random_engine  gen;
+
+int curr_rate = 0;
+
+struct LinkParam {
+  uint64_t period;
+  uint64_t bandwidth;
+  uint64_t randhop;
+  std::string delay_s;
+  Time delay;
+  std::uniform_int_distribution<int> randint;
+
+  LinkParam(uint64_t b, std::string d, uint64_t p, uint64_t h): 
+    period(p), bandwidth(b), randhop(h), delay_s(d), delay(d), randint(1, h) {}
+};
+
 class TopoHelper {
 
 public:
@@ -28,7 +78,6 @@ public:
   static std::unordered_map<uint64_t, NetDeviceContainer> netList;
   static std::unordered_map<uint64_t, Ipv4InterfaceContainer> ifList;
 
-  
   static std::normal_distribution<double> rjitnd;
 
   static void 
@@ -97,22 +146,29 @@ public:
   }
 
   static void 
-  ChangeBW(uint64_t rate, uint32_t i, uint32_t j, std::default_random_engine & gen, bool ratejitter=true) {
+  ChangeBW(LinkParam & l, uint32_t i, uint32_t j, std::default_random_engine & gen, bool ratejitter=true) {
+
+    uint64_t rate = l.bandwidth;
 
     if (ratejitter) {
       // int jit = rjitnd(gen);
       // if (-(jit*2) > 0 && (uint64_t)(-(jit*2)) >= rate)
       //   jit = 0;
-      rate = rate + rjitnd(gen);
+      rate += rjitnd(gen);
     }
 
     NS_LOG_INFO("Rate changing to " << rate);
 
     auto d = TopoHelper::GetLink(i, j);
-    auto dev = d.Get(0);
-    DynamicCast<PointToPointNetDevice>(dev)->SetDataRate(DataRate(rate));
-    dev = d.Get(1);
-    DynamicCast<PointToPointNetDevice>(dev)->SetDataRate(DataRate(rate));
+    auto dev_p = d.Get(0);
+    auto dev = DynamicCast<PointToPointNetDevice>(dev_p);
+    dev->SetDataRate(DataRate(rate));
+    auto t = l.delay * l.randint(gen);
+    (DynamicCast<PointToPointChannel>(dev->GetChannel()))->SetDelay(t);
+    dev_p = d.Get(1);
+    dev = DynamicCast<PointToPointNetDevice>(dev_p);
+    dev->SetDataRate(DataRate(rate));
+    //(DynamicCast<PointToPointChannel>(dev->GetChannel()))->SetDelay(delay);
 
   }
 
@@ -141,51 +197,15 @@ public:
 NodeContainer TopoHelper::allNodes = NodeContainer();
 std::unordered_map<uint64_t, NetDeviceContainer> TopoHelper::netList = std::unordered_map<uint64_t, NetDeviceContainer>();
 std::unordered_map<uint64_t, Ipv4InterfaceContainer> TopoHelper::ifList = std::unordered_map<uint64_t, Ipv4InterfaceContainer>();
-
-
 std::normal_distribution<double> TopoHelper::rjitnd = std::normal_distribution<double>();
 
-std::normal_distribution<double> tjitnd;
-
-std::ofstream qllog;
-std::ofstream frlog;
-std::ofstream lolog;
-std::ofstream cwndlog;
-std::ofstream config;
-
-std::string bwt_str;
-std::string hdelay = "10us";
-std::string sdelay = "10us";
-std::string q_size = "60p";
-std::string l_inter = "100us";
-std::vector<std::pair<uint64_t, uint64_t>> bwt;
-
-uint16_t sendPortBase = 50000;
-
-double nsd = 5000.0;
-double rjitter = 100000.0;
-double tjitter = 20.0;
-uint64_t max_bytes = 20000000000;
-uint64_t simtime = 60;
-uint64_t h_rate = 40000000000;
-uint64_t rwnd = 262144;
-uint64_t nflows = 1;
-bool nochange = false;
-bool indivlog = true;
-bool bidir = false;
-bool rjitter_enable = true;
-bool tjitter_enable = true;
-
-std::default_random_engine  gen;
-
-int curr_rate = 0;
 
 void CycleRate() {
 
   curr_rate = (curr_rate + 1) % bwt.size();
-  TopoHelper::ChangeBW(bwt[curr_rate].first, 2, 3, gen, rjitter_enable);
+  TopoHelper::ChangeBW(bwt[curr_rate], 2, 3, gen, rjitter_enable);
 
-  uint64_t t = bwt[curr_rate].second;
+  uint64_t t = bwt[curr_rate].period;
 
   if (tjitter_enable) {
     int jit = tjitnd(gen);
@@ -262,81 +282,91 @@ void ParseBWP(std::string & p)
 {
   std::istringstream ss(p);
   int c = 0;
-  uint64_t r = 0, t = 0;
+  std::string d;
+  uint64_t r = 0, pe = 0, h = 0;
 
   while (ss) {
     std::string next;
     if (!getline(ss, next, ',')) break;
 
-    if (c & 1) {
-      t = std::stoull(next);
-      bwt.push_back(std::make_pair(r, t));
-    }
-    else {
+    if (c == 0) {
       r = std::stoull(next);
     }
-
+    else if (c == 1) {
+      d = next;
+    }
+    else if (c == 2) {
+      pe = std::stoull(next);
+    }
+    else if (c == 3) {
+      h = std::stoull(next);
+      bwt.emplace_back(r, d, pe, h);
+      c = 0;
+      continue;
+    }
     c++;
   }
 }
 
-int main(int argc, char * argv[]) {
+  int main(int argc, char * argv[]) {
 
-  // Config::SetDefault ("ns3::Ipv4GlobalRouting::RespondToInterfaceEvents", BooleanValue (true));
-  LogComponentEnable("TcpCongestionOps", LOG_LEVEL_INFO);
+    // Config::SetDefault ("ns3::Ipv4GlobalRouting::RespondToInterfaceEvents", BooleanValue (true));
+    LogComponentEnable("TcpCongestionOps", LOG_LEVEL_INFO);
 
-  CommandLine cmd;
-  cmd.AddValue("BWP", "Bandwidth pattern", bwt_str);
-  cmd.AddValue("QueueLength", "Queue length of router", q_size);
-  cmd.AddValue("HostRate", "Link rate between host and TOR", h_rate);
-  cmd.AddValue("MaxBytes", "Number of tests to test", max_bytes);
-  cmd.AddValue("HostPropDelay", "Host propagation delay", hdelay);
-  cmd.AddValue("TorPropDelay", "Switch propagation delay", sdelay);
-  cmd.AddValue("LogInterval", "interval between mcp probe", l_inter);
-  cmd.AddValue("Static", "If the topology should be static. Will use the first linkrate in specified pattern", nochange);
-  cmd.AddValue("SimTime", "Max simulation time", simtime);
-  cmd.AddValue("RWND", "Receiver windown size", rwnd);
-  cmd.AddValue("NFlows", "Number of flows", nflows);
-  cmd.AddValue("Nsd", "standard deviation for flow start time", nsd);
-  cmd.AddValue("Rjitter", "BW rate Jitter.", rjitter);
-  cmd.AddValue("Tjitter", "BW frequency Jitter.", tjitter);
-  cmd.AddValue("Bidir", "Use bidirectional flow.", bidir);
-  cmd.Parse(argc, argv);
+    CommandLine cmd;
+    cmd.AddValue("BWP", "Bandwidth pattern", bwt_str);
+    cmd.AddValue("QueueLength", "Queue length of router", q_size);
+    cmd.AddValue("HostRate", "Link rate between host and TOR", h_rate);
+    cmd.AddValue("HostPropDelay", "Host propagation delay", hdelay);
+    cmd.AddValue("MaxBytes", "Number of tests to test", max_bytes);
+    cmd.AddValue("LogInterval", "interval between mcp probe", l_inter);
+    cmd.AddValue("DupAckTh", "Duplicate ACK threashold for retransmit", dupackth);
+    cmd.AddValue("Static", "If the topology should be static. Will use the first linkrate in specified pattern", nochange);
+    cmd.AddValue("SimTime", "Max simulation time", simtime);
+    cmd.AddValue("RWND", "Receiver windown size", rwnd);
+    cmd.AddValue("NFlows", "Number of flows", nflows);
+    cmd.AddValue("Nsd", "standard deviation for flow start time", nsd);
+    cmd.AddValue("Rjitter", "BW rate Jitter.", rjitter);
+    cmd.AddValue("Tjitter", "BW frequency Jitter.", tjitter);
+    cmd.AddValue("Bidir", "Use bidirectional flow.", bidir);
+    cmd.Parse(argc, argv);
 
-  ParseBWP(bwt_str);
+    ParseBWP(bwt_str);
 
-  std::random_device rd;
-  gen = std::default_random_engine(rd());
+    std::random_device rd;
+    gen = std::default_random_engine(rd());
 
-  if (((int)rjitter) <= 0)
-    rjitter_enable = false;
-  else
-    TopoHelper::rjitnd = std::normal_distribution<double>(0, rjitter);
+    if (((int)rjitter) <= 0)
+      rjitter_enable = false;
+    else
+      TopoHelper::rjitnd = std::normal_distribution<double>(0, rjitter);
 
-  if (((int)tjitter) <= 0)
-    tjitter_enable = false;
-  else
-    tjitnd = std::normal_distribution<double>(0, tjitter);
+    if (((int)tjitter) <= 0)
+      tjitter_enable = false;
+    else
+      tjitnd = std::normal_distribution<double>(0, tjitter);
 
-  auto t = std::time(nullptr);
-  auto tm = *std::localtime(&t);
-  std::ostringstream oss;
+    auto t = std::time(nullptr);
+    auto tm = *std::localtime(&t);
+    std::ostringstream oss;
 
-  oss.str("");
-  oss << "./qllog" << std::put_time(&tm, "_%m_%d_%Y_%H_%M_%S");
-  qllog.open(oss.str());
+    oss.str("");
+    oss << "./qllog" << std::put_time(&tm, "_%m_%d_%Y_%H_%M_%S");
+    qllog.open(oss.str());
 
-  // oss.str("");
-  // oss << "./frlog" << std::put_time(&tm, "_%m_%d_%Y_%H_%M_%S");
-  // frlog.open(oss.str());
+    // oss.str("");
+    // oss << "./frlog" << std::put_time(&tm, "_%m_%d_%Y_%H_%M_%S");
+    // frlog.open(oss.str());
 
-  // oss.str("");
-  // oss << "./lolog" << std::put_time(&tm, "_%m_%d_%Y_%H_%M_%S");
-  // lolog.open(oss.str());
+    // oss.str("");
+    // oss << "./lolog" << std::put_time(&tm, "_%m_%d_%Y_%H_%M_%S");
+    // lolog.open(oss.str());
 
-  // oss.str("");
-  // oss << "./cwndlog" << std::put_time(&tm, "_%m_%d_%Y_%H_%M_%S");
-  // cwndlog.open(oss.str());
+    /*
+    oss.str("");
+    oss << "./cwndlog" << std::put_time(&tm, "_%m_%d_%Y_%H_%M_%S");
+    cwndlog.open(oss.str());
+  */
 
   oss.str("");
   oss << "./config" << std::put_time(&tm, "_%m_%d_%Y_%H_%M_%S.json");
@@ -346,11 +376,11 @@ int main(int argc, char * argv[]) {
   config << "\t\"timestamp\":\t" << std::put_time(&tm, "\"%m_%d_%Y_%H_%M_%S\",") << std::endl;
   config << "\t\"host_rate\":\t"<< h_rate << "," << std::endl;
   config << "\t\"host_propdelay\":\t\"" << hdelay << "\"," << std::endl;
-  config << "\t\"switch_propdelay\":\t\"" << sdelay << "\"," << std::endl;
   config << "\t\"max_bytes\":\t" << max_bytes << "," << std::endl;
-  config << "\t\"queue_length\":\t\"" << q_size << "\"," << std::endl;
+  config << "\t\"queue_length\":\t" << q_size << "," << std::endl;
   config << "\t\"rwnd\":\t" << rwnd << "," << std::endl;
   config << "\t\"nflows\":\t" << nflows << "," << std::endl;
+  config << "\t\"dupack\":\t" << dupackth << "," << std::endl;
   config << "\t\"bidirectional\":\t" << bidir << "," << std::endl;
   config << "\t\"rate_jitter\":\t" << (rjitter_enable ? rjitter : 0) << "," << std::endl;
   config << "\t\"dt_jitter\":\t" << (tjitter_enable ? tjitter : 0 )<< "," << std::endl;
@@ -360,35 +390,36 @@ int main(int argc, char * argv[]) {
 
   for (uint64_t k = 0; k < bwt.size(); k++) {
     auto & item = bwt[k];
-    config << "\t\t{\"rate\": " << item.first << ", \"time\": " << item.second << "}" << (k==bwt.size()-1 ? "" : ",") << std::endl;  
+    config << "\t\t{\"rate\": " << item.bandwidth << 
+      ", \"delay\": \"" << item.delay_s << 
+      "\", \"period\": " << item.period << 
+      ", \"randhop\": " << item.randhop <<  "}" << (k==bwt.size()-1 ? "" : ",") << std::endl;  
   }
   
   config << "\t]," << std::endl;  
-
-  if (bidir) {
-    nflows *= 2;
-    max_bytes *= 2;
-  }
 
   Time::SetResolution(Time::NS);
   LogComponentEnable("TCP_LARGE_TRANSFER", LOG_LEVEL_INFO);
   LogComponentEnable("PacketSink", LOG_LEVEL_INFO);
   LogComponentEnable("BulkSendApplication", LOG_LEVEL_INFO);
 
+  //Packet::EnablePrinting();
+
   TopoHelper::Init(4);
 
   PointToPointHelper hp2p;
   PointToPointHelper sp2p;
   hp2p.SetDeviceAttribute("DataRate", DataRateValue(DataRate(h_rate)));
-  hp2p.SetDeviceAttribute("Mtu", UintegerValue(1522));
+  hp2p.SetDeviceAttribute("Mtu", UintegerValue(1514));
   hp2p.SetChannelAttribute("Delay", StringValue(hdelay));
   // hp2p.SetQueue ("ns3::DropTailQueue", "MaxSize", StringValue ("1p"));
   TopoHelper::Connect(hp2p, 0, 2);
   TopoHelper::Connect(hp2p, 1, 3);
 
-  sp2p.SetDeviceAttribute("DataRate", DataRateValue(DataRate(bwt[0].first)));
-  sp2p.SetDeviceAttribute("Mtu", UintegerValue(1522));
-  sp2p.SetChannelAttribute("Delay", StringValue(sdelay));
+  sp2p.SetDeviceAttribute("DataRate", DataRateValue(DataRate(bwt[0].bandwidth)));
+  sp2p.SetDeviceAttribute("Mtu", UintegerValue(1514));
+  sp2p.SetChannelAttribute("Delay", StringValue(bwt[0].delay_s));
+  sp2p.SetChannelType("PointToPointOrderedChannel");
   sp2p.SetQueue ("ns3::DropTailQueue", "MaxSize", StringValue ("1p"));
 
   TopoHelper::Connect(sp2p, 2, 3);
@@ -398,7 +429,7 @@ int main(int argc, char * argv[]) {
 
   TrafficControlHelper tch;
   uint16_t handle = tch.SetRootQueueDisc("ns3::FifoQueueDisc");
-  tch.AddInternalQueues(handle, 1, "ns3::DropTailQueue", "MaxSize", StringValue(q_size.c_str()));
+  tch.AddInternalQueues(handle, 1, "ns3::DropTailQueue", "MaxSize", QueueSizeValue(QueueSize(BYTES, (q_size*1514))));
   tch.Install(TopoHelper::GetLink(2, 3).Get(0));
   tch.Install(TopoHelper::GetLink(2, 3).Get(1));
 
@@ -416,9 +447,9 @@ int main(int argc, char * argv[]) {
   FlowMonitorHelper flowHelper;
   flowMonitor = flowHelper.InstallAll();
 
-  frdata = std::vector<uint64_t>(nflows, 0);
-  lodata = std::vector<uint64_t>(nflows, 0);
-  syndata = std::vector<uint64_t>(nflows, 0);
+  frdata = std::vector<uint64_t>(nflows*2, 0);
+  lodata = std::vector<uint64_t>(nflows*2, 0);
+  syndata = std::vector<uint64_t>(nflows*2, 0);
 
   Config::SetDefault("ns3::TcpSocket::SegmentSize", UintegerValue (1448));
 
@@ -437,9 +468,15 @@ int main(int argc, char * argv[]) {
   std::vector< Ptr<BulkSendApplication> > sendAppsl;
 
   uint64_t i = 0;
-  for (; i < nflows; i++) {
+  for (uint64_t j = 0; j < nflows; j++) {
+    i++;
 
     Ptr<Socket> ns3TcpSocket = Socket::CreateSocket (TopoHelper::allNodes.Get(0), TcpSocketFactory::GetTypeId());
+    //Ptr<TcpRecoveryOps> rec = CreateObject<TcpPrrRecovery>();
+    Ptr<TcpSocketBase> sb = DynamicCast<TcpSocketBase>(ns3TcpSocket);
+    //sb->SetRecoveryAlgorithm(rec);
+    sb->SetRetxThresh(dupackth);
+
     ns3TcpSocket->Bind(InetSocketAddress(sendPortBase+i));
 
     ns3TcpSocket->TraceConnect("CongestionWindow", std::to_string(i),  MakeCallback (&CwndTrace));
@@ -460,11 +497,17 @@ int main(int argc, char * argv[]) {
   }
 
   if (bidir) {
-    i++;
 
-    for (; i < nflows; i++) {
+    for (uint64_t j = 0; j < nflows; j++) {
+      i++;
 
       Ptr<Socket> ns3TcpSocket = Socket::CreateSocket (TopoHelper::allNodes.Get(1), TcpSocketFactory::GetTypeId());
+      //Ptr<TcpRecoveryOps> rec = CreateObject<TcpPrrRecovery>();
+
+      Ptr<TcpSocketBase> sb = DynamicCast<TcpSocketBase>(ns3TcpSocket);
+      //sb->SetRecoveryAlgorithm(rec);
+      sb->SetRetxThresh(dupackth);
+
       ns3TcpSocket->Bind(InetSocketAddress(sendPortBase+i));
 
       ns3TcpSocket->TraceConnect ("CongestionWindow", std::to_string(i),  MakeCallback (&CwndTrace));
@@ -502,7 +545,7 @@ int main(int argc, char * argv[]) {
     MakeCallback (&QlTrace));
 
   if (!nochange)
-    Simulator::Schedule(MicroSeconds(1000000+bwt[0].second), CycleRate);
+    Simulator::Schedule(MicroSeconds(1000000+bwt[0].period), CycleRate);
 
   Simulator::Stop(Seconds(simtime));
   Simulator::Run();
@@ -515,9 +558,12 @@ int main(int argc, char * argv[]) {
 
   config << "\t\"flowdata\":\t[" << std::endl;
 
+  if (bidir)
+    nflows *= 2;
+
   for (uint64_t k = 0; k < nflows; k++) {
     config << "\t\t{" << std::endl; 
-    config << "\t\t\t\"port\":\t" << (k + sendPortBase) << "," << std::endl; 
+    config << "\t\t\t\"port\":\t" << (1 + k + sendPortBase) << "," << std::endl; 
     config << "\t\t\t\"retransmit\":\t" << frdata[k] << "," << std::endl; 
     config << "\t\t\t\"timeout\":\t" << lodata[k] << "," << std::endl; 
     config << "\t\t\t\"syn_sent\":\t" << syndata[k] << std::endl; 
